@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/fogleman/gg"
 	"github.com/klauspost/reedsolomon"
 	"image"
 	"image/color"
@@ -15,58 +14,80 @@ import (
 )
 
 func encodeDataToImage(data interface{}) (image.Image, error) {
-	// Convert the data into a byte slice using JSON encoding.
-	dataBytes, err := json.Marshal(data)
+	dataBytes, err := marshalDataToBytes(data)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a byte slice of length 4 to store the length of the dataBytes.
-	// This is useful during decoding to know how much data to read.
+	dataBytesWithLength := prependLengthToData(dataBytes)
+
+	encodedShards, err := encodeDataUsingReedSolomon(dataBytesWithLength)
+	if err != nil {
+		return nil, err
+	}
+
+	flattenedData := mergeShards(encodedShards)
+
+	return createImageFromData(flattenedData), nil
+}
+
+func marshalDataToBytes(data interface{}) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+func prependLengthToData(dataBytes []byte) []byte {
 	lengthBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(lengthBytes, uint32(len(dataBytes)))
-	// Prepend this length information to the actual data.
-	dataBytes = append(lengthBytes, dataBytes...)
 
-	// Create a new Reed-Solomon encoder with 4 data shards and 2 parity shards.
-	enc, err := reedsolomon.New(4, 2)
+	return append(lengthBytes, dataBytes...)
+}
+
+func encodeDataUsingReedSolomon(dataBytes []byte) ([][]byte, error) {
+	encoder, err := reedsolomon.New(4, 2)
 	if err != nil {
 		return nil, err
 	}
 
-	// Split the data into shards.
-	shards, err := enc.Split(dataBytes)
+	shards, err := encoder.Split(dataBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	// Encode the shards. This creates parity shards and may modify the data shards.
-	if err = enc.Encode(shards); err != nil {
+	if err = encoder.Encode(shards); err != nil {
 		return nil, err
 	}
 
-	// Calculate the total number of pixels needed to represent the data in an image.
-	// The image is planned be a square (it can be made in any shape), so need to find out its side length.
-	totalPixels := len(dataBytes)
-	// The side length is the ceiling of the square root of totalPixels.
-	sideLength := int(math.Ceil(math.Sqrt(float64(totalPixels))))
-	dc := gg.NewContext(sideLength, sideLength) // Create a new drawing context for the image.
+	return shards, nil
+}
 
-	// Merge the shards into a single byte for easier pixel-wise processing.
+func mergeShards(shards [][]byte) []byte {
+	totalPixels := 0
+	for _, shard := range shards {
+		totalPixels += len(shard)
+	}
+
 	flattenedData := make([]byte, 0, totalPixels)
 	for _, shard := range shards {
 		flattenedData = append(flattenedData, shard...)
 	}
 
-	// Set each pixel's color based on the byte values in flattenedData.
+	return flattenedData
+}
+
+func createImageFromData(flattenedData []byte) image.Image {
+	totalPixels := len(flattenedData)
+	sideLength := int(math.Ceil(math.Sqrt(float64(totalPixels))))
+
+	dc := gg.NewContext(sideLength, sideLength)
+
 	for i := 0; i < totalPixels; i++ {
-		x := i % sideLength                          // x-coordinate in the image.
-		y := i / sideLength                          // y-coordinate in the image.
-		dc.SetColor(color.Gray{Y: flattenedData[i]}) // Set the color for the pixel.
-		dc.SetPixel(x, y)                            // Draw the pixel.
+		x := i % sideLength
+		y := i / sideLength
+		dc.SetColor(color.Gray{Y: flattenedData[i]})
+		dc.SetPixel(x, y)
 	}
 
-	return dc.Image(), nil
+	return dc.Image()
 }
 
 func decodeImageToData(img image.Image) (map[string]interface{}, error) {
